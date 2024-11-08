@@ -32,6 +32,8 @@ class SlackMusicConfig(BaseModel):
     voted: bool = False
     vote_count: int = 0
     votes: List[str] = []
+    submitted: bool = False
+    submissions: List[str] = []
 
 class User(BaseModel):
     id: str

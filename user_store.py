@@ -16,21 +16,30 @@ class SlackMusicUserStore():
 
         self.cache = cachetools.TTLCache(maxsize=128, ttl=300)
 
-    async def get_user(self, user_id: str) -> Optional[User]:
+    async def get_user(self, team_id: str, user_id: str) -> Optional[User]:
         """
         Get a user's data from Firestore using user_id.
+        # /workspaces/{team_id}/users/{user_id}
         """
-        doc = await self.db.collection("users").document(user_id).get()
+        cache_key = self._build_cache_key(team_id, user_id)
+        cache_user = self._get_from_cache(cache_key)
+        if cache_user:
+            return User(**cache_user)
+
+        doc = await self.db.collection("workspaces/{team_id}/users").document(user_id).get()
         if doc.exists:
+            self._add_to_cache(cache_key, doc.to_dict())
             return User(**doc.to_dict())
         return None
 
-    async def save_user(self, user_id: str, user: User):
+    async def save_user(self, team_id: str, user_id: str, user: User):
         """
         Save a user's data in Firestore using user_id.
         """
         user_data = user.model_dump(mode='json')
-        await self.db.collection("users").document(user_id).set(user_data)
+        await self.db.collection("workspaces/{team_id}/users").document(user_id).set(user_data)
+        cache_key = self._build_cache_key(team_id, user_id)
+        self.cache[cache_key] = user_data
 
     ### Cache Layer ###
 
@@ -46,8 +55,8 @@ class SlackMusicUserStore():
         """
         self.cache[cache_key] = installation_json
 
-    def _build_cache_key(self, enterprise_id: str, team_id: str, user_id: Optional[str]) -> str:
+    def _build_cache_key(self, team_id: str, user_id: str) -> str:
         """
         Build a cache key based on enterprise_id, team_id, and optionally user_id.
         """
-        return "cache_key"  # f"{enterprise_id}-{team_id}-{user_id if user_id else 'latest'}"
+        return f"{team_id}_{user_id}"
