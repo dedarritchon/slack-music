@@ -4,7 +4,7 @@ from typing import Optional
 from slack_sdk.oauth.installation_store.async_installation_store import AsyncInstallationStore
 from slack_sdk.oauth.installation_store.models import Installation
 import cachetools
-from models.weekly_polls import WeeklyPoll
+from models.weekly_polls import WeeklyPoll, SongInfo
 
 
 
@@ -36,9 +36,8 @@ class SlackMusicWeeklyPollsStore():
         await self.db.collection(f"workspaces/{team_id}/weekly_polls").document(poll.poll_id).set(poll_data)
         cache_key = self._build_cache_key(team_id, poll.poll_id)
         self._add_to_cache(cache_key, poll_data)
-    
 
-    def cast_vote(self, team_id: str, poll_id: str, song_id: str, user_id: str):
+    async def cast_vote(self, team_id: str, poll_id: str, song_id: str, user_id: str):
         # Reference to the weekly poll
         poll_ref = self.db.collection(f"workspaces/{team_id}/weekly_polls").document(poll_id)
 
@@ -60,7 +59,7 @@ class SlackMusicWeeklyPollsStore():
 
         # Start the transaction
         transaction = self.db.transaction()
-        increment_vote(transaction, poll_ref)
+        await increment_vote(transaction, poll_ref)
 
         # Optionally, record the user's vote
         vote_ref = poll_ref.collection('votes').document(user_id)

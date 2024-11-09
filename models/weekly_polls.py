@@ -24,8 +24,9 @@ class PollResults(BaseModel):
     created_at: datetime
 
 class VoteInfo(BaseModel):
-    song_voted_for: str
+    voted_for: str
     voted_at: datetime
+    voted_by: str
 
 class SongInfo(BaseModel):
     id: str
@@ -34,6 +35,7 @@ class SongInfo(BaseModel):
     artist: str
     album: str
     image_url: Optional[str] = None
+    submitted_by: str
 
 class WeeklyPoll(BaseModel):
     poll_id: str  # Identifier for the week's poll
