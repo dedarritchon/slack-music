@@ -46,6 +46,8 @@ class WeeklyPoll(BaseModel):
     votes:  Dict[str, VoteInfo] = {} # User ID to VoteInfo mapping
     results: Optional[PollResults] = None  # Results after the poll is closed
     vote_counts: Dict[str, int] = {} # Example: {"song_id_1": 5, "song_id_2": 3}
+    playlist_id: Optional[str] = None  # ID of the playlist where the songs are added
+    playlist_url: Optional[HttpUrl] = None  # URL of the playlist where the songs are added
 
     @classmethod
     def generate_poll_id(cls):
@@ -58,3 +60,4 @@ class WeeklyPoll(BaseModel):
             poll_id=poll_id,
             category=category,
         )
+

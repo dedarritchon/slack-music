@@ -9,10 +9,12 @@ from installation_store import SlackMusicInstallationStore
 from user_store import SlackMusicUserStore
 from models.users import User
 from weekly_polls_store import SlackMusicWeeklyPollsStore
-from models.weekly_polls import WeeklyPoll, SongInfo, PollResults, VoteInfo
+from models.weekly_polls import WeeklyPoll, SongInfo, VoteInfo
 import re
 from datetime import datetime
 from dotenv import load_dotenv
+import requests
+from requests.auth import HTTPBasicAuth
 load_dotenv()
 
 
@@ -145,10 +147,10 @@ async def update_home_tab_view(client, app_user: User, weekly_poll: WeeklyPoll, 
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": f":musical_note: *{song_info.title}* by {song_info.artist}"
+                        "text": f":musical_note: *{song_info.title}\n{song_info.artist}"
                     }
                 })
-
+# give me a backslash: \
     elif poll_status == "voting_open":
         # Show the voting form if the user hasn't voted yet
 
@@ -178,13 +180,13 @@ async def update_home_tab_view(client, app_user: User, weekly_poll: WeeklyPoll, 
 
         vote_info = await get_vote_information(weekly_poll)
 
-        for option in voting_options:
+        for (index, option) in enumerate(voting_options):
 
             vote_block = {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": ":white_check_mark: *{option.title}* by {option.artist}"
+                    "text": f"{index}. *{option.title}*\n{option.artist}"
                 }
             }
 
@@ -194,7 +196,7 @@ async def update_home_tab_view(client, app_user: User, weekly_poll: WeeklyPoll, 
                     "text": {
                         "type": "plain_text",
                         "emoji": True,
-                        "text": "Vote"
+                        "text": f"Vote for {index}"
                     },
                     "value": option.id,
                     "action_id": "vote"
@@ -219,14 +221,13 @@ async def update_home_tab_view(client, app_user: User, weekly_poll: WeeklyPoll, 
                     {
                         "type": "plain_text",
                         "emoji": True,
-                        "text": f"{len(voted_for_this_song_avatars)} votes"
+                        "text": f"{len(voted_for_this_song_avatars)} vote" + ("s" if len(voted_for_this_song_avatars) > 1 or len(voted_for_this_song_avatars) == 0 else "")
                     }
                 ]
             })
 
     elif poll_status == "closed":
         # Show the results
-        results = await get_poll_results(weekly_poll)
         view_blocks.append({
             "type": "section",
             "text": {
@@ -235,25 +236,33 @@ async def update_home_tab_view(client, app_user: User, weekly_poll: WeeklyPoll, 
             }
         })
 
-        if results is None:
+        voting_options = await get_voting_options(weekly_poll)
+
+        vote_info = await get_vote_information(weekly_poll)
+
+        votes_count = {}
+        for vote in vote_info:
+            if vote.voted_for in votes_count:
+                votes_count[vote.voted_for] += 1
+            else:
+                votes_count[vote.voted_for] = 1
+        
+        sorted_votes = sorted(votes_count.items(), key=lambda x: x[1], reverse=True)
+
+        for (index, (song_id, vote_count)) in enumerate(sorted_votes[:3]):
+            song_info = weekly_poll.songs[song_id]
             view_blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "No results available yet."
+                    "text": f":trophy: *{index + 1}.* {song_info.title}\n{song_info.artist}\nVotes: {vote_count}"
                 }
             })
         
-        else:
-            for song_id in results.top_songs:
-                song_info = weekly_poll.songs[song_id]
-                view_blocks.append({
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f":trophy: *{song_info.title}* by {song_info.artist} - {results.votes_count[song_id]} votes"
-                    }
-                })
+        # TODO: Show the playlist link
+
+
+        
 
     if app_user.is_admin:
         # Show admin controls
@@ -277,6 +286,28 @@ async def update_home_tab_view(client, app_user: User, weekly_poll: WeeklyPoll, 
                 }
             ]
         })
+
+        spotify_install_link = spotify_client.get_install_link()
+
+        # install spotify button
+        view_blocks.append({
+			"type": "section",
+			"text": {
+				"type": "mrkdwn",
+				"text": "Install Spotify to create playlists"
+			},
+			"accessory": {
+				"type": "button",
+				"text": {
+					"type": "plain_text",
+					"text": "Install Spotify",
+					"emoji": True
+				},
+				"value": "click_me_123",
+				"url": spotify_install_link,
+				"action_id": "button-action"
+			}
+		})
 
         if await user_has_submitted_song(app_user, weekly_poll):
             view_blocks.append({
@@ -381,10 +412,6 @@ async def get_voting_options(weekly_poll: WeeklyPoll) -> List[SongInfo]:
 async def get_vote_information(weekly_poll: WeeklyPoll) -> Optional[VoteInfo]:
     # Logic to retrieve vote information for the poll
     return weekly_poll.votes.values()
-
-async def get_poll_results(weekly_poll: WeeklyPoll) -> Optional[PollResults]:
-    # Logic to retrieve results for the poll
-    return weekly_poll.results
 
 @app.action("click_me_button")
 async def handle_some_action(ack, body, logger):
@@ -519,15 +546,62 @@ async def handle_unvote(ack, body, client, logger):
 
     await update_home_tab_view(client, app_user, weekly_poll, logger)
 
+class SpotifyClient:
+
+    REDIRECT_URI = 'http://localhost:8888/callback'  # Make sure this URI is whitelisted in your Spotify app settings
+    SCOPES = 'playlist-modify-public playlist-modify-private'
+
+    def __init__(self, client_id, client_secret):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.access_token = self.get_access_token()
+
+    def get_access_token(self):
+        # Logic to retrieve the access token
+        url = "https://accounts.spotify.com/api/token"
+        payload = {'grant_type': 'client_credentials'}
+        response = requests.post(url, data=payload, auth=HTTPBasicAuth(self.client_id, self.client_secret))
+        response_data = response.json()
+        return response_data['access_token']
+
+    def get_song_info(self, track_id):
+        # Logic to retrieve song information from the Spotify API
+        url = f"https://api.spotify.com/v1/tracks/{track_id}"
+        headers = {'Authorization': f'Bearer {self.access_token}'}
+        response = requests.get(url, headers=headers)
+        response_data = response.json()
+        return response_data
+    
+    def get_install_link(self):
+
+        auth_url = (
+            f"https://accounts.spotify.com/authorize?client_id={self.client_id}&response_type=code&"
+            f"redirect_uri={self.REDIRECT_URI}&scope={self.SCOPES}"
+        )
+
+        return auth_url
+
+    
+    def create_playlist(self, user_id, playlist_name):
+        # Logic to create a new playlist
+        url = f"https://api.spotify.com/v1/users/{user_id}/playlists"
+
+    
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", None)
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", None)
+
+spotify_client = SpotifyClient(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+
 async def get_song_info(user_id: str, track_id: str) -> SongInfo:
     # Logic to retrieve song information from the Spotify API
+    track_data = spotify_client.get_song_info(track_id)
     return SongInfo(
         id=track_id,
         link=f"https://open.spotify.com/track/{track_id}",
-        title="Unknown",
-        artist="Unknown",
-        album="Unknown",
-        image_url=None,
+        title=track_data['name'],
+        artist=", ".join(artist['name'] for artist in track_data['artists']),
+        album=track_data['album']['name'],
+        image_url=track_data['album']['images'][0]['url'] if track_data['album']['images'] else None,
         submitted_by=user_id
     )
 
@@ -613,6 +687,8 @@ async def handle_submitted_song(ack, body, client, logger):
     # Add the song to the weekly poll
 
     song_info = await get_song_info(app_user.id, track_id)
+
+    playlist = await get_weekly_playlist(weekly_poll)
 
     weekly_poll.songs[track_id] = song_info
 

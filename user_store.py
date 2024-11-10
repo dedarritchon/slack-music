@@ -26,7 +26,7 @@ class SlackMusicUserStore():
         if cache_user:
             return User(**cache_user)
 
-        doc = await self.db.collection("workspaces/{team_id}/users").document(user_id).get()
+        doc = await self.db.collection(f"workspaces/{team_id}/users").document(user_id).get()
         if doc.exists:
             self._add_to_cache(cache_key, doc.to_dict())
             return User(**doc.to_dict())
@@ -37,7 +37,7 @@ class SlackMusicUserStore():
         Save a user's data in Firestore using user_id.
         """
         user_data = user.model_dump(mode='json')
-        await self.db.collection("workspaces/{team_id}/users").document(user_id).set(user_data)
+        await self.db.collection(f"workspaces/{team_id}/users").document(user_id).set(user_data)
         cache_key = self._build_cache_key(team_id, user_id)
         self.cache[cache_key] = user_data
 
