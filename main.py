@@ -10,20 +10,23 @@ from user_store import SlackMusicUserStore
 from models.users import User
 from weekly_polls_store import SlackMusicWeeklyPollsStore
 from models.weekly_polls import WeeklyPoll, SongInfo, VoteInfo
+from spotify_installation_store import SlackSpotifyInstallationStore
 import re
 from datetime import datetime
 from dotenv import load_dotenv
 import requests
 from requests.auth import HTTPBasicAuth
+import json
 load_dotenv()
 
+
+APP_HOST = 'https://darri.ngrok.app'
 
 oauth_settings = AsyncOAuthSettings(
     client_id=os.environ["SLACK_CLIENT_ID"],
     client_secret=os.environ["SLACK_CLIENT_SECRET"],
     scopes=["channels:read", "groups:read", "chat:write"],
     installation_store=SlackMusicInstallationStore(),
-    # state_store=AsyncOAuthStateStore()
 )
 
 
@@ -39,6 +42,11 @@ app = AsyncApp(
 user_store = SlackMusicUserStore()
 weekly_polls_store = SlackMusicWeeklyPollsStore()
 
+spotify_installation_store = SlackSpotifyInstallationStore()
+
+
+from aiohttp import web
+import base64
 
 @app.event("team_access_granted")
 async def team_access_granted(client, event, logger):
@@ -287,27 +295,45 @@ async def update_home_tab_view(client, app_user: User, weekly_poll: WeeklyPoll, 
             ]
         })
 
-        spotify_install_link = spotify_client.get_install_link()
+        spotify_installation = await spotify_installation_store.get_installation(app_user.team_id)
 
-        # install spotify button
-        view_blocks.append({
-			"type": "section",
-			"text": {
-				"type": "mrkdwn",
-				"text": "Install Spotify to create playlists"
-			},
-			"accessory": {
-				"type": "button",
-				"text": {
-					"type": "plain_text",
-					"text": "Install Spotify",
-					"emoji": True
-				},
-				"value": "click_me_123",
-				"url": spotify_install_link,
-				"action_id": "button-action"
-			}
-		})
+        print("spotify installation:", spotify_installation)
+
+        if spotify_installation is None:
+            # install spotify button
+            view_blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "Install Spotify to create playlists"
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Install Spotify"
+                    },
+                    "action_id": "install_spotify",
+                }
+            })
+
+        else:
+            # show playlist link
+            view_blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Spotify Installation found."
+                },
+                "accessory": {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Uninstall Spotify"
+                    },
+                    "action_id": "uninstall_spotify",
+                }
+            })
 
         if await user_has_submitted_song(app_user, weekly_poll):
             view_blocks.append({
@@ -516,6 +542,30 @@ async def handle_unsubmit_song(ack, body, client, logger):
 
     await update_home_tab_view(client, app_user, weekly_poll, logger)
 
+@app.action("install_spotify")
+async def handle_install_spotify(ack, body, client, logger):
+    await ack()
+    logger.info(body)
+    print("unsubmit song")
+
+    team_id = body["user"]["team_id"]
+
+    user_id = body["user"]["id"]
+
+    app_user = await get_or_create_user(client, team_id, user_id)
+
+    # send message with link to install spotify
+
+    spotify_install_link = general_spotify_client.get_install_link(team_id, user_id)
+
+    try:
+        await client.chat_postMessage(
+            channel=app_user.id,
+            text=f"Click [here]({spotify_install_link}) to install Spotify"
+        )
+    except Exception as e:
+        logger.error(f"Error sending Spotify install link: {str(e)}")
+
 @app.action("unvote")
 async def handle_unvote(ack, body, client, logger):
     await ack()
@@ -548,8 +598,10 @@ async def handle_unvote(ack, body, client, logger):
 
 class SpotifyClient:
 
-    REDIRECT_URI = 'http://localhost:8888/callback'  # Make sure this URI is whitelisted in your Spotify app settings
-    SCOPES = 'playlist-modify-public playlist-modify-private'
+    REDIRECT_ENDPOINT = "/install/spotify/callback"
+
+    REDIRECT_URI = f'{APP_HOST}{REDIRECT_ENDPOINT}'  # Make sure this URI is whitelisted in your Spotify app settings
+    SCOPES = 'playlist-modify-public,playlist-modify-private'
 
     def __init__(self, client_id, client_secret):
         self.client_id = client_id
@@ -564,6 +616,25 @@ class SpotifyClient:
         response_data = response.json()
         return response_data['access_token']
 
+    def token_exchange(self, code):
+        # Logic to retrieve the access token
+        payload = {
+            "code": code,
+            "redirect_uri": self.REDIRECT_URI,
+            "grant_type": "authorization_code"
+        }
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": generate_auth_header(self.client_id, self.client_secret)
+        }
+        
+        response = requests.post('https://accounts.spotify.com/api/token', data=payload, headers=headers)
+
+        if response.status_code == 200:
+            return response.json()  # Successful token response
+        else:
+            return {"error": response.json().get("error", "unknown_error"), "status": response.status_code}
+
     def get_song_info(self, track_id):
         # Logic to retrieve song information from the Spotify API
         url = f"https://api.spotify.com/v1/tracks/{track_id}"
@@ -572,11 +643,19 @@ class SpotifyClient:
         response_data = response.json()
         return response_data
     
-    def get_install_link(self):
+    def get_install_link(self, team_id: str, user_id: str):
+
+        state = {
+            "team_id": team_id,
+            "user_id": user_id
+        }
+
+        # encode in some way to decode later
+        state_encoded = base64.b64encode(json.dumps(state).encode("utf-8")).decode("utf-8")
 
         auth_url = (
             f"https://accounts.spotify.com/authorize?client_id={self.client_id}&response_type=code&"
-            f"redirect_uri={self.REDIRECT_URI}&scope={self.SCOPES}"
+            f"redirect_uri={self.REDIRECT_URI}&scope={self.SCOPES}&state={state_encoded}"
         )
 
         return auth_url
@@ -590,11 +669,92 @@ class SpotifyClient:
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", None)
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", None)
 
-spotify_client = SpotifyClient(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+general_spotify_client = SpotifyClient(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
+
+
+def generate_auth_header(client_id, client_secret):
+    """
+    Generate the Base64-encoded Authorization header for Spotify API.
+    """
+    credentials = f"{client_id}:{client_secret}"
+    return "Basic " + base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+
+
+def handle_token_exchange(code):
+    """
+    Send a POST request to Spotify to exchange the authorization code for an access token.
+    example response:
+    {'access_token': 'BQBECTyY_ZlfX...123nhhg', 'token_type': 'Bearer', 'expires_in': 3600, 'refresh_token': 'AQAdXZVao1X_34vOl...5gRmQI5VxuBjunOnSY', 'scope': 'playlist-modify-public'}
+    """
+    payload = {
+        "code": code,
+        "redirect_uri": general_spotify_client.REDIRECT_URI,
+        "grant_type": "authorization_code"
+    }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization": generate_auth_header(general_spotify_client.client_id, general_spotify_client.client_secret)
+    }
+    
+    response = requests.post('https://accounts.spotify.com/api/token', data=payload, headers=headers)
+
+    if response.status_code == 200:
+        return response.json()  # Successful token response
+    else:
+        return {"error": response.json().get("error", "unknown_error"), "status": response.status_code}
+
+
+async def install_spotify_callback(_req: web.Request):
+
+    print("install spotify callback")
+
+    code = _req.query.get("code")
+
+    state = _req.query.get("state")
+
+    print("code:", code)
+    print("state:", state)
+
+    if code is None:
+        return web.Response(text="Error: Missing code parameter", status=400)
+    
+    if state is None:
+        return web.Response(text="Error: Missing state parameter", status=400)
+    
+    token_response = general_spotify_client.token_exchange(code)
+
+    if "error" in token_response:
+        return web.Response(text=f"Error: {token_response['error']}", status=400)
+
+    print("token response:", token_response)
+
+    state_decoded = base64.b64decode(state).decode("utf-8")
+
+    state_data = json.loads(state_decoded)
+
+    team_id = state_data["team_id"]
+
+    user_id = state_data["user_id"]
+
+    print("team_id:", team_id)
+
+    print("user_id:", user_id)
+
+    access_token = token_response['access_token']
+    refresh_token = token_response['refresh_token']
+    expires_in = token_response['expires_in']
+
+    await spotify_installation_store.save_installation(team_id, user_id, access_token, refresh_token, expires_in)
+
+    return web.Response(text="Spotify installed successfully")
+
+web_app = app.web_app()
+web_app.add_routes([web.get(SpotifyClient.REDIRECT_ENDPOINT, install_spotify_callback)])
+
 
 async def get_song_info(user_id: str, track_id: str) -> SongInfo:
     # Logic to retrieve song information from the Spotify API
-    track_data = spotify_client.get_song_info(track_id)
+    track_data = general_spotify_client.get_song_info(track_id)
     return SongInfo(
         id=track_id,
         link=f"https://open.spotify.com/track/{track_id}",
